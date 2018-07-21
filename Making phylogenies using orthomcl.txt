@@ -1,0 +1,415 @@
+
+#---------------------------------The Tldr; of making phylogenies using orthomcl 
+*need a file with .fna for each genome of interest listing all proteins 
+*run through orthomcl to get groups.txt 
+*Since getting the group.txt file I then filter it using the code supplied by someone online to isolate core orthologs across all species
+	>python 2.7 FilterorthoMCLgroups.py -g groups.txt -n (number of genomes in groups file) 
+*use the filtered groups.txt file with my custom R script to isolate out the sequences for all of the orthologs found in all species and then run an msa with muscle and concatenate, this outputs concatenated fasta for each genome
+*make a single afa file by pasting in all of the fastas in one file called all_seq.fa or something
+*use this for input to raxml with code like this:
+	 /usr/local/bin/raxmlHPC-AVX -m GTRGAMMA -f a -p 12345 -s /Users/harleymount/Desktop/concatenated_fasta/complete_concat_muscle.fasta  -# 100 -n T6 -x 12345
+
+
+blast command:
+
+All-V-All blast
+>makeblastdb -dbtype nucl -parse_seqids -in goodProteins.fasta 
+>blastn -db goodProteins.fasta -query goodProteins.fasta  -outfmt 6 -out all_vs_all.tsv
+
+
+
+
+
+
+#------------Official orthomcl installation manual 
+
+#------------Using homebrew make a fresh installation of mysql 
+*there are some specifics to this
+*you must install like so: 
+brew install mysql --from-source --enable-local-infile
+
+This will take a long time to complete, let it do its thing. Once finished it will have setup mysql with a root user that lacks a password, can login with
+
+>mysql -uroot 
+but don't do so yet. 
+
+#------------Install MCl
+brew install mcl 
+
+#------------Install orthomcl software to your path
+download the orthomcl software and pput the main folder in /usr/local/
+add the perl scripts to your path by adding this to your .bash_profile
+>export PATH=$PATH:/usr/local/orthomclSoftware-v2.0.9/bin 
+
+
+#------------Prepare directories and database
+
+make a directory that is easy to access to store your data in (orthomcl_dir)
+make a file called orthomcl.config that looks like the following,  and place it in your orthomcl_dir
+
+
+#-------------Copy below
+# this config assumes a mysql database named 'orthomcl'.  adjust according
+# to your situation.
+dbVendor=mysql 
+#dbConnectString=dbi:mysql:orthomcl:localhost:3307
+dbConnectString=dbi:mysql:orthomcl:mysql_local_infile=1:localhost:3307
+dbLogin=orthomcl
+dbPassword=orthomcl
+similarSequencesTable=SimilarSequences
+orthologTable=Ortholog
+inParalogTable=InParalog
+coOrthologTable=CoOrtholog
+interTaxonMatchView=InterTaxonMatch
+percentMatchCutoff=50
+evalueExponentCutoff=-5
+oracleIndexTblSpc=NONE
+#-------------Dont COPY THIS LINE
+
+you will need to configure the mysql distribution that was supplied by homebrew as well: 
+
+locate the file called my.cnf in /usr/local/etc/ and modidfy it to look like this: 
+
+
+
+#-------------Copy below
+# Default Homebrew MySQL server config
+
+[client]
+
+
+
+port=3307
+
+loose-local-infile=1
+
+
+
+[mysqld]
+# Only allow connections from localhost
+bind-address = 127.0.0.1
+
+port=3307
+
+
+
+key_buffer_size=64M
+
+#[OPTIMIZATION]
+#Set this value to 50% of available RAM if your environment permits.
+myisam_sort_buffer_size=4G
+
+#[OPTIMIZATION]
+#This value should be at least 50% of free hard drive space. Use caution if setting it to 100% of free space however. Your hard disk may fill up!
+myisam_max_sort_file_size=200G
+
+#[OPTIMIZATION]
+#Our default of 2G is probably fine for this value. Change this value only if you are using a machine with little resources available. 
+read_buffer_size=2G
+#-------------Dont COPY THIS LINE
+
+
+now login to mysql as root and make a orthomcl database and new orthomcl user
+>mysqladmin -u root password "strongrootpasswordhere"
+>mysql -uroot -p
+>CREATE USER 'orthomcl'@'localhost' IDENTIFIED BY 'orthomcl';
+>CREATE DATABASE orthomcl;
+>GRANT SELECT,INSERT,UPDATE,DELETE,CREATE VIEW,CREATE, INDEX, DROP on orthomcl.* TO orthomcl@localhost;
+
+
+
+You will need to cpanm DBD:mysql and DBI or try this: 
+
+perl -MCPAN -e shell
+          cpan> o conf makepl_arg "mysql_config=/path_to_your_mysql_dir/bin/mysql_config"
+          cpan> install Data::Dumper
+          cpan> install DBI
+          cpan> force install DBD::mysql
+
+
+
+
+
+
+#------------Begin orthomcl analysis
+
+#---Step 1 Adding schema to orthomcl database: 
+>cd orthomcl_dir
+>perl orthomclInstallSchema orthomcl.confi
+
+
+No output is a good sign
+
+>perl orthomclAdjustFasta (put a straincode here 3-4 letters no parentheses) strain.fasta 2
+
+to explain the line above, you run the code with a 3-4 letter identifier for your fa files, followed by the fasta file you are adjusting (do this for all fasta sequnces individually) 
+thew last part is most important, the header gets split for each gene, you tell it which item in the list is the unique ID , usually 2, 
+
+
+place the convertec fasta files into a new directory called compliantFasta
+
+#---step 3
+now filter the fasta files for only high quality sequences
+>perl orthomclFilterFasta compliantFasta 10 20 
+
+this makes a file called goodProteins.fasta
+#---step 4
+perform all-V-all blast 
+>makeblastdb -dbtype nucl -parse_seqids -in goodProteins.fasta 
+>blastn -db goodProteins.fasta -query goodProteins.fasta  -outfmt 6 -out all_vs_all.tsv
+
+
+this makes a file called all_vs_all.tsv 
+#---step 5
+now parse the blast results 
+>perl orthomclBlastParser all_vs_all.tsv compliantFasta
+
+this  makes a file called similarSequences.txt
+
+#---step 6
+load results into sql database
+>perl orthomclLoadBlast orthomcl.config similarSequences.txt
+
+#---step 7
+determine pairs of orthologs
+>perl orthomclPairs orthomcl.config ortho.log cleanup=yes 
+
+#---step 8
+retrieve pairs data from database
+>perl orthomclDumpPairsFiles orthomcl.config
+
+
+makes a file called mclInput
+#---step 9
+analyze data in mcl 
+>mcl mclInput --abc -I 1.5 -o mclOutput
+
+
+#---step 10 
+now write out groups file 
+>perl orthomclMclToGroups group 1 < mclOutput > groups.txt 
+
+
+
+#---Step 11
+Filter the groups.txt file for just core groups using python script 
+>python 2.7 FilterorthoMCLgroups.py -g groups.txt -n (number of genomes in groups file) 
+##############################################################################################################################################################################################################################
+##############################################################################################################################################################################################################################
+#-----python code: 
+#!/usr/bin/env python
+
+import sys
+import os
+import getopt
+
+# This script filters protein groups output from OrthoMCL and returns those that
+# contain only one protein per genome and have all genomes represented
+
+def get_arguments(argv):
+    if len(argv) == 0:
+        usage()
+        sys.exit(2)
+    inGroupsFile = None
+    numberOfGenomes = None
+    try:
+        opts, args = getopt.getopt(argv, "g:n:")
+    except getopt.GetoptError:
+        usage()
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-n':
+            numberOfGenomes = int(arg)
+        elif opt == '-g':
+            inGroupsFile = arg
+    return (inGroupsFile, numberOfGenomes)
+
+def usage():
+    print "FilterOrthoMCLGroups.py\n \
+        -g <input groups file>\n \
+        -n <number of genomes>"
+
+def read_groups_file(inFileName):
+    """ Read in groups file and create dictionary of group name and proteins in
+    group"""
+    inFile = open(inFileName, 'r')
+    groupsDict = {}
+    for line in inFile:
+        line = line.strip()
+        entries = line.split(':')
+        groupName = entries[0]
+        groupProteins = entries[1][1:].split(' ')
+        groupsDict[groupName] = groupProteins
+    inFile.close()
+    return groupsDict
+
+def filter_groups(groupsDict, genomeNum):
+    """ Looks through groups and checks if they have a single protein for 
+    each genome. Returns a list of groups that meets this criteria"""
+    keepList = []
+    for group in groupsDict:
+        genomeList = []
+        proteinList = groupsDict[group]
+        for protein in proteinList:
+            ids = protein.split('|')
+            genomeID = ids[0]
+            genomeList.append(genomeID)
+        genomeSet = set(genomeList)    # create set to check for duplicates
+        if len(genomeList) == genomeNum and len(genomeSet) == genomeNum:
+            keepList.append(group)
+    return keepList
+
+def write_file(inFileName, groupsDict, keepList):
+    """ Writes groups in keep list with their proteins to a file."""
+    outFileName = os.path.splitext(inFileName)[0] + '_filter.txt'
+    outFile = open(outFileName, 'w')
+    for group in keepList:
+        outFile.write(group + ': ' + ' '.join(sorted(groupsDict[group])) + '\n')
+    outFile.close()
+
+if None in get_arguments(sys.argv[1:]):
+    usage()
+    sys.exit(2)
+else:
+    inFileName, genomeNum = get_arguments(sys.argv[1:])
+
+groupsDict = read_groups_file(inFileName)
+keepList = filter_groups(groupsDict, genomeNum)
+write_file(inFileName, groupsDict, keepList)
+
+##############################################################################################################################################################################################################################
+##############################################################################################################################################################################################################################
+
+
+
+#------------Using orthomcl data to generate core genome concatenated alignments in R
+
+I have written custom code that can use your input fasta files for orthomcl, in conjunction with the groups_filter file to strip out the core sequences, perform muscle aligments on these sequences individually and then concatenate the alignments to a super-alignment for each strain, this can then be written out individually and merged in a single fasta file for raxML tree building
+
+
+
+#-------------Rcode below, called isolate_core_gene_sequences.R:
+
+##############################################################################################################################################################################################################################
+##############################################################################################################################################################################################################################
+
+
+library(Biostrings)
+library(msa)
+library(seqinr)
+
+#--------import sequences into individual dataframes to be subset later for alignment
+#clinical isolate
+clin = readDNAStringSet("clin.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+clin_df <- data.frame(seq_name, sequence)
+
+#hottub isolate
+clin = readDNAStringSet("hotb.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+hotb_df <- data.frame(seq_name, sequence)
+
+#43290 isolate
+clin = readDNAStringSet("43290.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+ATCC_df <- data.frame(seq_name, sequence)
+
+#Lens isolate
+clin = readDNAStringSet("lens.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+lens_df <- data.frame(seq_name, sequence)
+
+#philly isolate
+clin = readDNAStringSet("phil.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+phil_df <- data.frame(seq_name, sequence)
+
+#TB isolate
+clin = readDNAStringSet("thun.fasta")
+seq_name = names(clin)
+sequence = paste(clin)
+thun_df <- data.frame(seq_name, sequence)
+#---------------------
+
+
+#---Reading in filtered groups.txt file to subset the dataframes of each species for the core genes
+orthologs<-read.table('groups_filter.txt')
+
+#Subset ATCC DF for only those in the orthologs table
+ATCC_df_subset<-ATCC_df[ATCC_df$seq_name %in% orthologs$V2,]
+ATCC_df_subset$sequence<-as.character(ATCC_df_subset$sequence)
+
+#Subset clin DF for only those in the orthologs table
+clin_df_subset<-clin_df[clin_df$seq_name %in% orthologs$V3,]
+clin_df_subset$sequence<-as.character(clin_df_subset$sequence)
+
+#Subset hottub DF for only those in the orthologs table
+hotb_df_subset<-hotb_df[hotb_df$seq_name %in% orthologs$V4,]
+hotb_df_subset$sequence<-as.character(hotb_df_subset$sequence)
+
+#Subset Lens DF for only those in the orthologs table
+lens_df_subset<-lens_df[lens_df$seq_name %in% orthologs$V5,]
+lens_df_subset$sequence<-as.character(lens_df_subset$sequence)
+
+#Subset philly DF for only those in the orthologs table
+phil_df_subset<-phil_df[phil_df$seq_name %in% orthologs$V6,]
+phil_df_subset$sequence<-as.character(phil_df_subset$sequence)
+
+#Subset TB DF for only those in the orthologs table
+thun_df_subset<-thun_df[thun_df$seq_name %in% orthologs$V7,]
+thun_df_subset$sequence<-as.character(thun_df_subset$sequence)
+
+
+install.packages('msa')
+library(msa)
+
+
+#this performs many individual msas and constantly appends each growing the super alignment
+concat_align<-c('','','','','','')
+for (i in 1:length(ATCC_df_subset$sequence)){
+  my_sequences<-c(ATCC_df_subset$sequence[as.character(ATCC_df_subset$seq_name) == as.character(orthologs$V2[i])], clin_df_subset$sequence[as.character(clin_df_subset$seq_name) == as.character(orthologs$V3[i])], hotb_df_subset$sequence[as.character(hotb_df_subset$seq_name) == as.character(orthologs$V4[i])], lens_df_subset$sequence[as.character(lens_df_subset$seq_name) == as.character(orthologs$V5[i])], phil_df_subset$sequence[as.character(phil_df_subset$seq_name) == as.character(orthologs$V6[i])], thun_df_subset$sequence[as.character(thun_df_subset$seq_name) == as.character(orthologs$V7[i])])
+  alignment<-msa::msa(my_sequences, type='dna', order = 'input', 'Muscle')
+  alignment_convert<-msaConvert(alignment, type="seqinr::alignment") #as alignments are made they can be pasted together!!!!!!! like this : merge<-paste0(test_convert$seq, test_convert$seq)
+  concat_align<-paste0(concat_align, alignment_convert$seq)
+}
+
+
+
+
+
+#save teh concatenated alignments to file 
+save(concat_align, file='concat_alignment_NEW_MUSCLE.RData')
+
+#write out each individual concatenated alignment to a seperate file for 
+write.fasta(concat_align[1], names = 'ATCC43290', file.out = 'ATCC43290_concat_muscle.fasta')
+write.fasta(concat_align[2], names = 'YYC_clinical', file.out = 'YYC_clinical_concat_muscle.fasta')
+write.fasta(concat_align[3], names = 'YYC_hottub', file.out = 'YYC_hottub_concat_muscle.fasta')
+write.fasta(concat_align[4], names = 'Lens', file.out = 'Lens_concat_muscle.fasta')
+write.fasta(concat_align[5], names = 'Philadelphia', file.out = 'philly_concat_muscle.fasta')
+write.fasta(concat_align[6], names = 'Thunderbay', file.out = 'TB_concat_muscle.fasta')
+
+
+##############################################################################################################################################################################################################################
+##############################################################################################################################################################################################################################
+
+
+
+
+
+#------------Generating a phylogenetic tree with RaXML using the concatenated alignment file 
+For each of your concatenated fasta super aligments you should paste it into a new single fasta file with all strains present to be used for tree building. 
+with this fasta file you can run a 100 bootstrap tree building with GTRGAMMA model of substitution like so : 
+
+/usr/local/bin/raxmlHPC-AVX -m GTRGAMMA -f a -p 12345 -s /Users/harleymount/Desktop/concatenated_fasta/complete_concat_muscle.fasta  -# 100 -n Phylogeny -x 12345
+
+
+The output will be a bestTree file that can be visualized in figTree.
+
+
+
+
